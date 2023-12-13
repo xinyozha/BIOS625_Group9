@@ -1,0 +1,152 @@
+---
+title: "final code"
+author: "Xinyu Zhang"
+date: "2023-12-13"
+output: html_document
+---
+
+
+### Install package
+```{r}
+install.packages("keras")
+install.packages("e1071")
+install.packages("caret")
+install.packages("doParallel")
+install.packages("sparklyr")
+library(readr)
+library(keras)
+library(doParallel)
+library(foreach)
+library(parallel)
+library(e1071)
+library(caret)
+library(randomForest)
+library(sparklyr)
+library(dplyr)
+```
+
+
+### Data Integration
+
+```{r}
+files <- list.files(path = "data", pattern = "*.csv", full.names = TRUE)
+
+read_csv <- function(file_path) {
+  read.csv(file_path)
+}
+desired_columns <- c("IYEAR","EDUCA","SMOKE100","EXERANY2","MARITAL","NUMADULT",
+                     "RENTHOM1", "HLTHPLN1", "EMPLOY1", "PVTRESD1", "MEDCOST","CHILDREN",
+                     "INCOME2", "MENTHLTH")
+
+read_and_extract <- function(file_path) {
+  data <- read.csv(file_path)
+  data[desired_columns[desired_columns %in% names(data)]]
+}
+
+cl <- makeCluster(detectCores() - 1)
+
+clusterExport(cl, varlist = c("desired_columns", "read_and_extract"))
+
+all_data_list <- parLapply(cl, files, read_and_extract)
+
+stopCluster(cl)
+
+all_data <- do.call(rbind, all_data_list)
+
+write.csv(all_data, "merged_data.csv", row.names = FALSE)
+```
+
+
+### Data management
+```{r}
+#all_data = read.csv("merged_data.csv")
+data = na.omit(all_data)
+data <- data[data$MENTHLTH <= 70, ]
+data <- data[data$CHILDREN <= 20, ]
+data <- data[data$INCOME2 <= 70, ]
+data$MENTHLTH <- cut(data$MENTHLTH, breaks = c(1, 5, 10, 15, 20, 25, Inf), labels = c("1", "2", "3", "4", "5", "6"), right = FALSE)
+
+summary(data$MENTHLTH)
+
+data$IYEAR <- gsub("b'", "", data$IYEAR)
+data$IYEAR <- gsub("'", "", data$IYEAR) 
+data$IYEAR <- as.integer(data$IYEAR)
+data$IYEAR <- data$IYEAR - 2020
+
+summary(data$IYEAR)
+
+set.seed(123)
+data_index <- sample(1:nrow(data), size = 0.7 * nrow(data))
+train_set <- data[data_index, ]
+test_set <- data[-data_index, ]
+
+write.csv(data, "final_data.csv", row.names = FALSE)
+```
+
+### random forest
+```{r}
+data = read.csv("final_data.csv")
+#parallel
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+rf_parallel_time <- system.time({
+    rf_model_parallel <- randomForest(MENTHLTH ~ ., data = train_set)})
+stopCluster(cl)
+
+brfss_rf=randomForest(MENTHLTH~.,data=train_set,ntree=800,importance=TRUE,proximity=TRUE)
+
+#base
+system.time({
+  model_base <- randomForest(MENTHLTH ~ ., data = train_set)
+}) -> time_base_rf
+
+#spark 46.35
+spark_available_versions()
+spark_install(version = 3.3)
+sc <- spark_connect(master = "local")
+options(rstudio.connectionObserver.errorsSuppressed = TRUE)
+options("sparklyr.simple.errors" = TRUE)
+sc <- spark_connect(master = "local", config = list("spark.executor.memory" = "4g"))
+sdf <- copy_to(sc, data, "data", overwrite = TRUE)
+train_sdf <- copy_to(sc, train_set, "train_set", overwrite = TRUE)
+test_sdf <- copy_to(sc, test_set, "test_set", overwrite = TRUE)
+
+system.time({
+  rf_model_spark <- train_sdf %>%
+    ml_random_forest(MENTHLTH ~ .)
+}) -> time_spark_rf
+
+spark_disconnect(sc)
+```
+
+
+```{r}
+efficiency_comparison <- data.frame(
+  Random_Forest = c("Base", "Parallel", "Spark"),
+  Time = c(time_base_rf[3], rf_parallel_time[3], time_spark_rf[3])
+)
+efficiency_comparison
+predictions <-  predict(model_base, test_set)
+predictions <- as.integer(as.factor(predictions))
+test_set$MENTHLTH <- as.integer(as.factor(test_set$MENTHLTH))
+mse = mean((test_set$MENTHLTH - predictions)^2)
+mae = mean(abs(test_set$MENTHLTH - predictions))
+var_y = var(test_set$MENTHLTH)
+nmse = mse / var_y
+accuracy <- data.frame(
+  Test = c("MSE", "MAE", "nMSE"),
+  Output = c(mse, mae, nmse)
+)
+
+
+importance <- as.data.frame(importance(rf_model_parallel))
+ggplot(importance, aes(x = reorder(row.names(importance), MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Features") +
+  ylab("Importance")
+
+
+```
+
+
