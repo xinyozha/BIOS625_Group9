@@ -323,12 +323,14 @@ print(predict_performance(rf_predictions, test_set$MENTHLTH))
 
 ### efficiency_comparison
 ```{r}
-efficiency_comparison_rf <- data.frame(
+# For MLR
+efficiency_comparison_mlr <- data.frame(
   Linear_Regression <- c("Original", "Rcpp"),
   Time <- c(time_mlr[3], time_rcpp_mlr[3])
 )
+print(efficiency_comparison_mlr)
 
-print(efficiency_comparison_rf)
+# For Random Forest
 efficiency_comparison_rf <- data.frame(
   Random_Forest <- c("Original", "Parallel", "Spark"),
   Time <- c(time_base_rf[3], rf_parallel_time[3], time_spark_rf[3])
